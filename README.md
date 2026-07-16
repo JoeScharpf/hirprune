@@ -2,6 +2,9 @@
 
 A single-cell, Colab-native visualizer for [HiPrune](https://github.com/Danielement321/HiPrune) — paste `hiprune_colab.py` into one Google Colab cell, pick a model and an image, and see exactly which visual tokens the model kept and which it pruned, alongside the baseline vs. pruned responses and full statistics.
 
+<img width="1402" height="515" alt="Screenshot 2026-07-16 at 12 32 58 PM" src="https://github.com/user-attachments/assets/60c93daf-d898-4781-adcc-df9a2c9955ea" />
+
+
 ## What is HiPrune?
 
 HiPrune ([paper](https://arxiv.org/abs/2508.00553), [original repo](https://github.com/Danielement321/HiPrune)) is a **training-free, model-agnostic visual token pruning method** for vision-language models. VLMs turn an image into hundreds or thousands of visual tokens, and LLM inference cost grows with that count — but most tokens are redundant. HiPrune exploits the *hierarchical attention* inside the vision encoder itself to decide which tokens matter, with no retraining and no extra model:
