@@ -470,15 +470,17 @@ else:
     assert GEMMA_POS_KEY is not None, \
         f"No patch-position key found in processor output: {list(inputs.keys())}"
 
-    # Derive the token grid from the patch positions. The processor resizes
-    # to multiples of unit = patch_size * pooling_kernel_size = 48 px, so for
-    # a single image every 3x3 pooling window is fully valid (no padding).
-    _pp = inputs[GEMMA_POS_KEY][0]                # (num_patches, 2) as (x, y)
-    assert not (_pp == -1).all(dim=-1).any(), "Unexpected padding patches for a single image"
+    # Derive the token grid from the patch positions. The processor always
+    # pads pixel_values / position ids up to the fixed budget of
+    # max_soft_tokens * pooling_kernel_size^2 patches (280*9 = 2520), marking
+    # padding patches with position (-1, -1) -- even for a single image. The
+    # model masks those out internally; the selection pass below must too.
+    _pp = inputs[GEMMA_POS_KEY][0]                # (max_patches, 2) as (x, y)
+    _gemma_valid = ~((_pp == -1).all(dim=-1))     # True = real patch
     POOL_K = model.config.vision_config.pooling_kernel_size       # 3
     PATCH = model.config.vision_config.patch_size                 # 16
-    patch_w = int(_pp[:, 0].max()) + 1
-    patch_h = int(_pp[:, 1].max()) + 1
+    patch_w = int(_pp[_gemma_valid, 0].max()) + 1
+    patch_h = int(_pp[_gemma_valid, 1].max()) + 1
     grid_w = patch_w // POOL_K                    # pooled soft-token grid
     grid_h = patch_h // POOL_K
     n_tokens = grid_w * grid_h
@@ -488,10 +490,18 @@ else:
     n_placeholders = int((inputs["input_ids"][0] == model.config.image_token_id).sum())
     assert n_placeholders == n_tokens, \
         f"Soft-token grid ({n_tokens}) != image placeholders ({n_placeholders})"
+    if "num_soft_tokens_per_image" in inputs:
+        _n_soft = int(torch.as_tensor(inputs["num_soft_tokens_per_image"]).flatten()[0])
+        assert _n_soft == n_tokens, \
+            f"Derived grid ({n_tokens}) != processor num_soft_tokens_per_image ({_n_soft})"
 
-    # Patch index -> soft token index, exactly as Gemma4VisionPooler
-    # _avg_pool_by_positions computes it: (x//k) + (patch_w//k) * (y//k).
-    _gemma_kernel_idx = (_pp[:, 0] // POOL_K) + grid_w * (_pp[:, 1] // POOL_K)
+    # Patch index -> soft token index for REAL patches only, exactly as
+    # Gemma4VisionPooler._avg_pool_by_positions computes it:
+    # (x//k) + (patch_w//k) * (y//k). Padding positions would map to negative
+    # indices, so they are excluded here and in the scoring below.
+    _gemma_kernel_idx = (
+        (_pp[_gemma_valid, 0] // POOL_K) + grid_w * (_pp[_gemma_valid, 1] // POOL_K)
+    )
 
 # ------------------ HiPrune port for Gemma (selection pass) -----------------
 # Unlike Qwen/LLaVA, where the authors' forward prunes internally, the Gemma
@@ -522,20 +532,24 @@ if IS_GEMMA:
     def _gemma_soft_scores(layer_attn):
         """Per-soft-token attention score for one encoder layer.
 
-        Patch score = mean over heads, mean over queries (the 'global
+        Patch score = mean over heads, mean over VALID queries (the 'global
         attention' variant the authors use for CLS-free encoders); soft-token
         score = SUM over the 3x3 pooling window, using the same one-hot
         weight construction as Gemma4VisionPooler._avg_pool_by_positions
         (sum instead of the pooler's mean: it keeps the scores a probability
         distribution over soft tokens -- patch scores sum to 1 -- and is
-        order-equivalent for topk selection). Float32 throughout -- this
-        port's spec, since there is no author implementation to bit-match.
+        order-equivalent for topk selection). Padding patches are excluded on
+        both axes: padding keys are attention-masked by the encoder anyway,
+        but padding query rows are garbage and must not be averaged in.
+        Float32 throughout -- this port's spec, since there is no author
+        implementation to bit-match.
         """
-        patch_scores = layer_attn[0].float().mean(dim=0).mean(dim=0)  # (num_patches,)
+        attn = layer_attn[0].float().mean(dim=0)                       # (queries, keys)
+        patch_scores = attn[_gemma_valid][:, _gemma_valid].mean(dim=0)  # (num_valid,)
         weights = torch.nn.functional.one_hot(
             _gemma_kernel_idx.long(), n_tokens
         ).float()
-        return weights.T @ patch_scores                               # (n_tokens,)
+        return weights.T @ patch_scores                                # (n_tokens,)
 
     shallow_attention = _gemma_soft_scores(_attns[OBJECT_LAYER - 1])
     deep_attention_src = _gemma_soft_scores(_attns[-1])
