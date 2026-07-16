@@ -868,8 +868,14 @@ print(f"[HiPrune  | {n_kept} visual tokens, retention {RETENTION_RATIO:.3f}]\n{p
 print("\n" + "=" * 78)
 print("TOKEN STATISTICS")
 print("=" * 78)
+_orig_px = pil_image.width * pil_image.height
+print(f"  Original image          : {pil_image.width}x{pil_image.height} px  ({_orig_px / 1e6:.1f} MP)")
 if IS_QWEN:
     print(f"  Image resized to        : {resized_size[0]}x{resized_size[1]} px")
+    if _orig_px < MAX_PIXELS:
+        # Qwen never upscales: below the cap, the image itself limits tokens.
+        print(f"  NOTE: image is below the MAX_PIXELS cap ({MAX_PIXELS / 1e6:.1f} MP) -- visual token")
+        print("        count is limited by the image; a larger image yields more tokens.")
     print(f"  Merged token grid       : {grid_w} x {grid_h}  (each token = {CELL}x{CELL} px)")
     print(f"  Total visual tokens     : {n_tokens}  ({n_tokens * merge**2} raw 14px ViT patches)")
 elif IS_LLAVA:
@@ -919,6 +925,7 @@ if baseline_t["decode_tps"] > 0 and pruned_t["decode_tps"] > 0:
     print(f"  Decode throughput gain: {pruned_t['decode_tps'] / baseline_t['decode_tps']:.2f}x")
 print("  Note: total time is NOT apples-to-apples when the two runs generate")
 print("  different token counts -- compare prefill and decode tok/s instead.")
-print("  Gemma's small soft-token count (<=280) means pruning gains are")
-print("  smaller than on models with 1000+ visual tokens.")
+if IS_GEMMA:
+    print("  Gemma's small soft-token count (<=280) means pruning gains are")
+    print("  smaller than on models with 1000+ visual tokens.")
 print("=" * 78)
